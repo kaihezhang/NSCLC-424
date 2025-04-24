@@ -1,0 +1,36 @@
+import os
+import nibabel as nib
+import numpy as np
+import json
+
+def get_bbox_from_mask(mask_path):
+    mask_img = nib.load(mask_path)
+    mask_data = mask_img.get_fdata()
+
+    coords = np.argwhere(mask_data > 0)
+
+    if coords.size == 0:
+        raise ValueError(f"No segmented region found in {mask_path}")
+
+    # Bounding Box 坐标 (x, y, z)
+    x_min, y_min, z_min = coords.min(axis=0)
+    x_max, y_max, z_max = coords.max(axis=0)
+
+    return int(x_min), int(y_min), int(z_min), int(x_max), int(y_max), int(z_max)
+
+# 修改为你的 mask 文件夹路径
+mask_folder = 'C:/Users/95602/Desktop/ultrasound-contrastivemodels-klr-us-rna/TCIA/TCIA/NSCLC Radiogenomics/segmentations'
+
+bbox_coords = {}
+
+for mask_file in os.listdir(mask_folder):
+    if mask_file.endswith('.nii.gz'):
+        mask_path = os.path.join(mask_folder, mask_file)
+        patient_id = mask_file.replace('_mask.nii.gz', '.nii.gz')  # 假设文件名对应关系是明确的
+        bbox_coords[patient_id] = get_bbox_from_mask(mask_path)
+
+# 将结果保存为 JSON 文件
+with open('bbox_coords.json', 'w') as f:
+    json.dump(bbox_coords, f)
+
+print('Bounding Box 坐标已保存至 bbox_coords.json 文件中。')
