@@ -1,0 +1,144 @@
+import os
+import json
+import torch
+import pandas as pd
+import numpy as np
+import nibabel as nib
+from PIL import Image
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+import torch.nn as nn
+
+from model import RNAEncoder, ImageEncoder, CLIPModel, ContrastiveLoss
+
+# 路径配置
+rna_path = "C:/Users/95602/Desktop/ultrasound-contrastivemodels-klr-us-rna/TCIA/TCIA/GSE103584_R01_NSCLC_RNAseq.txt"
+excel_path = "C:/Users/95602/Desktop/ultrasound-contrastivemodels-klr-us-rna/TCIA/TCIA/TCIA-cohorts1.xlsx"
+image_directory = "C:/Users/95602/Desktop/ultrasound-contrastivemodels-klr-us-rna/TCIA/TCIA/NSCLC Radiogenomics/NII"
+bbox_json_path = "C:/Users/95602/PycharmProjects/PythonProject2/bbox_coords.json"
+
+# 加载 RNA 数据
+rna_df = pd.read_csv(rna_path, sep="\t", index_col=0).transpose().fillna(0)
+
+# 加载临床标签
+df_clinical = pd.read_excel(excel_path)
+df_clinical["Patient.ID"] = df_clinical["Patient.ID"].astype(str).str.strip()
+rna_df.index = rna_df.index.str.strip()
+
+# 加载 BBox 坐标
+with open(bbox_json_path, "r") as f:
+    bbox_coords = json.load(f)
+
+# 匹配样本（修复格式差异：R01-007 → R01007）
+rna_filtered, image_filenames = [], []
+for _, row in df_clinical.iterrows():
+    pid = row["Patient.ID"].strip()
+    pid_normalized = pid.replace("-", "")  # e.g. R01-007 → R01007
+    raw_fname = f"{pid}.nii.gz"
+    seg_fname = f"seg{pid_normalized}.nii.gz"
+
+    if pid in rna_df.index and seg_fname in bbox_coords and os.path.exists(os.path.join(image_directory, raw_fname)):
+
+            rna_filtered.append(rna_df.loc[pid])
+            image_filenames.append(raw_fname)
+
+rna_filtered_df = pd.DataFrame(rna_filtered)
+print(f"[INFO] 有效样本数: {len(rna_filtered_df)}")
+if len(rna_filtered_df) == 0:
+    raise ValueError("❌ 没有找到任何有效的训练样本，请检查 BBox 文件、RNA 数据和图像路径是否匹配！")
+
+# 数据划分
+rna_train, rna_val, img_train, img_val = train_test_split(
+    rna_filtered_df, image_filenames, test_size=0.2, random_state=42
+)
+
+# 图像预处理
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+])
+
+# 自定义数据集类
+class RNACustomDataset(Dataset):
+    def __init__(self, rna_data, image_filenames, image_directory, bbox_json_path, transform=None):
+        self.rna_data = rna_data.reset_index(drop=True)
+        self.image_filenames = image_filenames
+        self.image_directory = image_directory
+        self.transform = transform
+
+        with open(bbox_json_path, 'r') as f:
+            self.bbox_coords = json.load(f)
+
+        self.valid_indices = [
+            i for i, fname in enumerate(self.image_filenames)
+            if f"seg{fname.replace('-', '').replace('.nii.gz', '')}.nii.gz" in self.bbox_coords
+            and os.path.exists(os.path.join(image_directory, fname))
+        ]
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def __getitem__(self, idx):
+        true_idx = self.valid_indices[idx]
+
+        rna_sample = torch.tensor(self.rna_data.iloc[true_idx].values.astype(float)).float()
+
+        img_filename = self.image_filenames[true_idx]
+        img_path = os.path.join(self.image_directory, img_filename)
+        nii_image = nib.load(img_path)
+        image_volume = nii_image.get_fdata()
+
+        seg_key = f"seg{img_filename.replace('-', '').replace('.nii.gz', '')}.nii.gz"
+        bbox = self.bbox_coords[seg_key]
+        x_min, x_max, y_min, y_max, z_min, z_max = bbox
+        x_min, x_max = sorted([x_min, x_max])
+        y_min, y_max = sorted([y_min, y_max])
+        z_min, z_max = sorted([z_min, z_max])
+        roi_volume = image_volume[x_min:x_max, y_min:y_max, z_min:z_max]
+
+        if roi_volume.shape[2] == 0:
+            raise ValueError(f"❌ 空的 ROI 区域: {img_filename}, bbox: {bbox}")
+
+        mid_slice = roi_volume[:, :, roi_volume.shape[2] // 2]
+        rgb_slice = np.stack([mid_slice] * 3, axis=-1)
+        image = Image.fromarray(np.uint8(rgb_slice))
+
+        if self.transform:
+            image = self.transform(image)
+
+        return rna_sample, image
+
+# 数据加载器
+train_dataset = RNACustomDataset(rna_train, img_train, image_directory, bbox_json_path, transform)
+val_dataset = RNACustomDataset(rna_val, img_val, image_directory, bbox_json_path, transform)
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+
+# 模型与损失
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = CLIPModel(RNAEncoder(input_dim=22126), ImageEncoder()).to(device)
+contrastive_loss = ContrastiveLoss(temperature=0.5)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+
+# 对比学习训练阶段
+for epoch in range(10):
+    model.train()
+    total_loss = 0
+    for rna, images in train_loader:
+        rna, images = rna.to(device), images.to(device)
+        rna_emb, img_emb = model(rna, images)
+        loss = contrastive_loss(rna_emb, img_emb)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    avg_loss = total_loss / len(train_loader)
+    print(f"Epoch {epoch + 1}, Contrastive Loss: {avg_loss:.4f}")
+
+# 保存嵌入空间用于下游任务
+torch.save(model.state_dict(), "clip_model_contrastive_pretrained.pth")
+print("✅ 对比学习模型已保存：clip_model_contrastive_pretrained.pth")
