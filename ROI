@@ -18,7 +18,7 @@ def get_bbox_from_mask(mask_path):
 
     return int(x_min), int(y_min), int(z_min), int(x_max), int(y_max), int(z_max)
 
-# 修改为你的 mask 文件夹路径
+
 mask_folder = 'C:/Users/95602/Desktop/ultrasound-contrastivemodels-klr-us-rna/TCIA/TCIA/NSCLC Radiogenomics/segmentations'
 
 bbox_coords = {}
@@ -26,7 +26,7 @@ bbox_coords = {}
 for mask_file in os.listdir(mask_folder):
     if mask_file.endswith('.nii.gz'):
         mask_path = os.path.join(mask_folder, mask_file)
-        patient_id = mask_file.replace('_mask.nii.gz', '.nii.gz')  # 假设文件名对应关系是明确的
+        patient_id = mask_file.replace('_mask.nii.gz', '.nii.gz')  
         bbox_coords[patient_id] = get_bbox_from_mask(mask_path)
 
 # 将结果保存为 JSON 文件
