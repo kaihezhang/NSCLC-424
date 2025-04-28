@@ -30,7 +30,7 @@ rna_df.index = rna_df.index.str.strip()
 with open(bbox_json_path, "r") as f:
     bbox_coords = json.load(f)
 
-# 匹配样本（修复格式差异：R01-007 → R01007）
+# 匹配样本
 rna_filtered, image_filenames = [], []
 for _, row in df_clinical.iterrows():
     pid = row["Patient.ID"].strip()
@@ -46,7 +46,7 @@ for _, row in df_clinical.iterrows():
 rna_filtered_df = pd.DataFrame(rna_filtered)
 print(f"[INFO] 有效样本数: {len(rna_filtered_df)}")
 if len(rna_filtered_df) == 0:
-    raise ValueError("❌ 没有找到任何有效的训练样本，请检查 BBox 文件、RNA 数据和图像路径是否匹配！")
+    raise ValueError("没有找到任何有效的训练样本")
 
 # 数据划分
 rna_train, rna_val, img_train, img_val = train_test_split(
@@ -98,7 +98,7 @@ class RNACustomDataset(Dataset):
         roi_volume = image_volume[x_min:x_max, y_min:y_max, z_min:z_max]
 
         if roi_volume.shape[2] == 0:
-            raise ValueError(f"❌ 空的 ROI 区域: {img_filename}, bbox: {bbox}")
+            raise ValueError(f"空的 ROI 区域: {img_filename}, bbox: {bbox}")
 
         mid_slice = roi_volume[:, :, roi_volume.shape[2] // 2]
         rgb_slice = np.stack([mid_slice] * 3, axis=-1)
@@ -141,4 +141,4 @@ for epoch in range(10):
 
 # 保存嵌入空间用于下游任务
 torch.save(model.state_dict(), "clip_model_contrastive_pretrained.pth")
-print("✅ 对比学习模型已保存：clip_model_contrastive_pretrained.pth")
+print("对比学习模型已保存：clip_model_contrastive_pretrained.pth")
